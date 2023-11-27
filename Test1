@@ -1,2 +1,31 @@
-#test print()
-print("Hello World")
+class JPEG:
+    # [Other methods]
+
+    def StartOfScan(self, data, hdrlen):
+        data, lenchunk = RemoveFF00(data[hdrlen:])
+
+        st = Stream(data)
+        oldlumdccoeff, oldCbdccoeff, oldCrdccoeff = 0, 0, 0
+        self.pixel_data = [[(0, 0, 0) for _ in range(self.width)] for _ in range(self.height)]
+
+        for y in range(self.height // 8):
+            for x in range(self.width // 8):
+                matL, oldlumdccoeff = self.BuildMatrix(
+                    st, 0, self.quant[self.quantMapping[0]], oldlumdccoeff
+                )
+                matCr, oldCrdccoeff = self.BuildMatrix(
+                    st, 1, self.quant[self.quantMapping[1]], oldCrdccoeff
+                )
+                matCb, oldCbdccoeff = self.BuildMatrix(
+                    st, 1, self.quant[self.quantMapping[2]], oldCbdccoeff
+                )
+                self.store_pixel_data(x, y, matL.base, matCb.base, matCr.base)
+
+        return lenchunk + hdrlen
+
+    def store_pixel_data(self, x, y, matL, matCb, matCr):
+        for yy in range(8):
+            for xx in range(8):
+                # Convert YCrCb to RGB
+                rgb = ColorConversion(matL[yy][xx], matCr[yy][xx], matCb[yy][xx])
+                self.pixel_data[y * 8 + yy][x * 8 + xx] = rgb
