@@ -5,7 +5,7 @@ from math import ceil, cos, pi
 from scipy.interpolate import griddata
 from typing import Callable, Tuple, Union
 from pathlib import Path
-# Version 5
+
 # JPEG markers (for our supported segments)
 SOI  = bytes.fromhex("FFD8")    # Start of image
 SOF0 = bytes.fromhex("FFC0")    # Start of frame (Baseline DCT)
@@ -42,9 +42,9 @@ class Mf_JpegDecoder():
         """
         # Handlers for the markers
         self.handlers = {
-            DHT: self.dd_huffman_table,
-            DQT: self.dd_quantization_table,
-            DRI: self.dd_res_intval,
+            DHT: self.define_huffman_table,
+            DQT: self.define_quantization_table,
+            DRI: self.define_res_intval,
             SOF0: self.st_fme,
             SOF2: self.st_fme,
             SOS: self.start_of_scan,
@@ -104,7 +104,7 @@ class Mf_JpegDecoder():
         
 
         dd_size = len(data)
-        dd_header = 0
+        data_header = 0
 
         
         
@@ -117,37 +117,37 @@ class Mf_JpegDecoder():
         elif mode == SOF2:
             #self.scan_mode = "progressive_dct"
             #print("Scan mode: Progressive")
-            print("Doesn't support")
+            print("Not support")
         #else:
             #raise UnsupportedJpeg("Encoding mode not supported. Only 'Baseline DCT' and 'Progressive DCT' are supported.")
         
-        # Check sample temp_pcision
+        # Check sample precision
         # (This is the number of bits used to represent each color value of a pixel)
-        temp_pcision = data[dd_header]
-        if temp_pcision != 8:
+        precision = data[data_header]
+        if precision != 8:
             raise UnsupportedJpeg("Unsupported color depth. Only 8-bit greyscale and 24-bit RGB are supported.")
-        dd_header += 1
+        data_header += 1
         
         # Get image dimensions
-        self.img_h = bytes_to_uint(data[dd_header : dd_header+2])
-        dd_header += 2
+        self.img_h = bytes_to_uint(data[data_header : data_header+2])
+        data_header += 2
         
 
-        self.img_w = bytes_to_uint(data[dd_header : dd_header+2])
-        dd_header += 2
+        self.img_w = bytes_to_uint(data[data_header : data_header+2])
+        data_header += 2
         print(f"Image dimensions: {self.img_w} x {self.img_h}")
 
         if self.img_w == 0:
             raise CorruptedJpeg("Image width cannot be zero.")
 
         # Check number of color components
-        components_amount = data[dd_header]
+        components_amount = data[data_header]
         if components_amount not in (1, 3):
             if components_amount == 4:
                 raise UnsupportedJpeg("CMYK color space is not supported. Only RGB and greyscale are supported.")
             else:
                 raise UnsupportedJpeg("Unsupported color space. Only RGB and greyscale are supported.")
-        dd_header += 1
+        data_header += 1
 
         if components_amount == 3:
             print("Color space: YCbCr")
@@ -165,29 +165,29 @@ class Mf_JpegDecoder():
             for count, component in enumerate(components, start=1):
                 
                 # Get the ID of the color component
-                my_id = data[dd_header]
-                dd_header += 1
+                my_id = data[data_header]
+                data_header += 1
 
                 # Get the horizontal and vertical sampling of the component
-                sample = data[dd_header]          # This value is 8 bits long
-                h_sample = sample >> 4     # Get the fiMKRS 4 bits of the value
-                v_sample = sample & 0x0F     # Get the last 4 bits of the value
+                sample = data[data_header]          # This value is 8 bits long
+                horizontal_sample = sample >> 4     # Get the fiMKRS 4 bits of the value
+                vertical_sample = sample & 0x0F     # Get the last 4 bits of the value
 
-                dd_header += 1
+                data_header += 1
 
                 # Get the quantization table for the component
-                temp_quan_table = data[dd_header]
-                dd_header += 1
+                my_quantization_table = data[data_header]
+                data_header += 1
 
                 # Group the parameters of the component
                 my_component = ColCom(
                     name = component,                                       # Name of the color component
                     order = count-1,                                        # Order in which the component will come in the image
-                    horizontal_sampling = h_sample,                # Amount of pixels sampled in the horizontal
-                    vertical_sampling = v_sample,                    # Amount of pixels sampled in the vertical
-                    quantization_table_id = temp_quan_table,          # Quantization table selector
-                    repeat = h_sample * v_sample,           # Amount of times the component repeats during decoding
-                    shape = (8*h_sample, 8*v_sample),       # Dimensions (in pixels) of the MCU for the component
+                    horizontal_sampling = horizontal_sample,                # Amount of pixels sampled in the horizontal
+                    vertical_sampling = vertical_sample,                    # Amount of pixels sampled in the vertical
+                    quantization_table_id = my_quantization_table,          # Quantization table selector
+                    repeat = horizontal_sample * vertical_sample,           # Amount of times the component repeats during decoding
+                    shape = (8*horizontal_sample, 8*vertical_sample),       # Dimensions (in pixels) of the MCU for the component
                 )
 
                 # Add the component parameters to the dictionary
@@ -207,23 +207,23 @@ class Mf_JpegDecoder():
         self.s_shape = (sample_width, sample_height)
 
         # Display the samplings
-        #print(f"Horizontal sampling: {' x '.join(str(component.horizontal_sampling) for component in self.col_com.values())}")
-        #print(f"Vertical sampling  : {' x '.join(str(component.vertical_sampling) for component in self.col_com.values())}")
+        print(f"Horizontal sampling: {' x '.join(str(component.horizontal_sampling) for component in self.col_com.values())}")
+        print(f"Vertical sampling  : {' x '.join(str(component.vertical_sampling) for component in self.col_com.values())}")
         
         # Move the file header to the end of the data segment
         self.file_h += dd_size
 
-    def dd_huffman_table(self, data:bytes) -> None:
+    def define_huffman_table(self, data:bytes) -> None:
         """Parse the Huffman tables from the file.
         """
         dd_size = len(data)
-        dd_header = 0
+        data_header = 0
 
         
 
-        while (dd_header < dd_size):
-            table_destination = data[dd_header]
-            dd_header += 1
+        while (data_header < dd_size):
+            table_destination = data[data_header]
+            data_header += 1
 
             # Count how many codes of each length there are
             
@@ -231,9 +231,9 @@ class Mf_JpegDecoder():
             codes_count = {
                 bit_length: count
                 for bit_length, count
-                in zip(range(1, 17), data[dd_header : dd_header+16])
+                in zip(range(1, 17), data[data_header : data_header+16])
             }
-            dd_header += 16
+            data_header += 16
 
             # Get the Huffman values (HUFFVAL)
             
@@ -242,71 +242,71 @@ class Mf_JpegDecoder():
 
             for bit_length, count in codes_count.items():
                 huffval_dict.update(
-                    {bit_length: data[dd_header : dd_header+count]}
+                    {bit_length: data[data_header : data_header+count]}
                 )
-                dd_header += count
+                data_header += count
             
             # Error checking
-            if (dd_header > dd_size):
+            if (data_header > dd_size):
                 # If we tried to read more bytes than what the data has, then something is wrong with the file
                 raise CorruptedJpeg("Failed to parse Huffman tables.")
             
             # Build the Huffman tree
             
 
-            buide_huffman_tree = {}
+            huffman_tree = {}
 
             code = 0
             for bit_length, values_list in huffval_dict.items():
                 code <<= 1
                 for huffval in values_list:
                     code_string = bin(code)[2:].rjust(bit_length, "0")
-                    buide_huffman_tree.update({code_string: huffval})
+                    huffman_tree.update({code_string: huffval})
                     code += 1
             
             # Add tree to the Huffman table dictionary
-            self.huffman_tables.update({table_destination: buide_huffman_tree})
-            print(f" - ", end="")
-            #print(f"ID: {table_destination & 0x0F} ({'DC' if table_destination >> 4 == 0 else 'AC'})")
+            self.huffman_tables.update({table_destination: huffman_tree})
+            print(f"Parsed Huffman table - ", end="")
+            print(f"ID: {table_destination & 0x0F} ({'DC' if table_destination >> 4 == 0 else 'AC'})")
 
            
 
         # Move the file header to the end of the data segment
         self.file_h += dd_size
 
-    def dd_quantization_table(self, data:bytes) -> None:
+    def define_quantization_table(self, data:bytes) -> None:
         """Parse the quantization table from the file.
         """
         dd_size = len(data)
-        dd_header = 0
+        data_header = 0
 
         
 
         # Get all quantization tables on the data
-        while (dd_header < dd_size):
-            table_destination = data[dd_header]
-            dd_header += 1
+        while (data_header < dd_size):
+            table_destination = data[data_header]
+            data_header += 1
 
            
 
             # Get the 64 values of the 8 x 8 quantization table
-            qt_values = np.array([value for value in data[dd_header : dd_header+64]], dtype="int16")
+            qt_values = np.array([value for value in data[data_header : data_header+64]], dtype="int16")
             try:
                 quantization_table = undo_zigzag(qt_values)
             except ValueError:
                 raise CorruptedJpeg("Failed to parse quantization tables.")
-            dd_header += 64
+            data_header += 64
 
             # Add the table to the quantization tables dictionary
             self.quantization_tables.update({table_destination: quantization_table})
-            #print(f" quantization table - ID: {table_destination}")
+            print(f"Parsed quantization table - ID: {table_destination}")
 
             
         
         # Move the file header to the end of the data segment
         self.file_h += dd_size
 
-    def dd_res_intval(self, data:bytes) -> None:
+    def define_res_intval(self, data:bytes) -> None:
         """Parse the restart interval value."""
         self.res_intval = bytes_to_uint(data[:2])
         self.file_h += 2
@@ -319,24 +319,24 @@ class Mf_JpegDecoder():
         then passes this information to the method that handles the scan mode used."""
         
         dd_size = len(data)
-        dd_header = 0
+        data_header = 0
 
         
 
         # Number of color components in the scan
-        components_amount = data[dd_header]
-        dd_header += 1
+        components_amount = data[data_header]
+        data_header += 1
 
         # Get parameters of the components in the scan
         my_huffman_tables = {}
         my_col_com = {}
         for component in range(components_amount):
-            component_id = data[dd_header]    # Should match the component ID's on the 'start of frame'
-            dd_header += 1
+            component_id = data[data_header]    # Should match the component ID's on the 'start of frame'
+            data_header += 1
 
             # Selector for the Huffman tables
-            tables = data[dd_header]
-            dd_header += 1
+            tables = data[data_header]
+            data_header += 1
             dc_table =  tables >> 4             # Should match the tables ID's on the 'detect huffman table'
             ac_table = (tables & 0x0F) | 0x10
            
@@ -347,12 +347,12 @@ class Mf_JpegDecoder():
         
         # Get spectral selection and successive approximation
         if self.scan_mode == "progressive_dct":
-            spectral_selection_start = data[dd_header]    # Index of the fiMKRS values of the data unit
-            spectral_selection_end = data[dd_header+1]    # Index of the last values of the data unit
-            bit_position_high = data[dd_header+2] >> 4    # The position of the last bit sent in the previous scan
-            bit_position_low = data[dd_header+2] & 0x0F   # The position of the bit sent in the current scan
+            spectral_selection_start = data[data_header]    # Index of the fiMKRS values of the data unit
+            spectral_selection_end = data[data_header+1]    # Index of the last values of the data unit
+            bit_position_high = data[data_header+2] >> 4    # The position of the last bit sent in the previous scan
+            bit_position_low = data[data_header+2] & 0x0F   # The position of the bit sent in the current scan
            
-            dd_header += 3
+            data_header += 3
         
         # Move the file header to the begining of the entropy encoded segment
         self.file_h += dd_size
@@ -369,27 +369,27 @@ class Mf_JpegDecoder():
         # Dimensions of the MCU (minimum coding unit)
         
         if components_amount > 1:
-            self.mcu_w:int = 8 * max(component.horizontal_sampling for component in self.col_com.values())
-            self.mcu_h:int = 8 * max(component.vertical_sampling for component in self.col_com.values())
-            self.mcu_shape = (self.mcu_w, self.mcu_h)
+            self.mcu_width:int = 8 * max(component.horizontal_sampling for component in self.col_com.values())
+            self.mcu_height:int = 8 * max(component.vertical_sampling for component in self.col_com.values())
+            self.mcu_shape = (self.mcu_width, self.mcu_height)
         else:
-            self.mcu_w:int = 8
-            self.mcu_h:int = 8
+            self.mcu_width:int = 8
+            self.mcu_height:int = 8
             self.mcu_shape = (8, 8)
 
         # Amount of MCUs in the whole image (horizontal, vertical, and total)
         
         if components_amount > 1:
-            self.mcu_count_h = (self.img_w // self.mcu_w) + (0 if self.img_w % self.mcu_w == 0 else 1)
-            self.mcu_count_v = (self.img_h // self.mcu_h) + (0 if self.img_h % self.mcu_h == 0 else 1)
+            self.mcu_count_h = (self.img_w // self.mcu_width) + (0 if self.img_w % self.mcu_width == 0 else 1)
+            self.mcu_count_v = (self.img_h // self.mcu_height) + (0 if self.img_h % self.mcu_height == 0 else 1)
         else:
             component = my_col_com[component_id]
             sample_ratio_h = self.s_shape[0] / component.shape[0]
             sample_ratio_v = self.s_shape[1] / component.shape[1]
             layer_width = self.img_w / sample_ratio_h
             layer_height = self.img_h / sample_ratio_v
-            self.mcu_count_h = ceil(layer_width / self.mcu_w)
-            self.mcu_count_v = ceil(layer_height / self.mcu_h)
+            self.mcu_count_h = ceil(layer_width / self.mcu_width)
+            self.mcu_count_v = ceil(layer_height / self.mcu_height)
         
         self.mcu_count = self.mcu_count_h * self.mcu_count_v
 
@@ -580,9 +580,9 @@ class Mf_JpegDecoder():
                 """
                 
                 # Add the MCU to the image
-                x = self.mcu_w * mcu_x
-                y = self.mcu_h * mcu_y
-                self.Img_array[x : x+self.mcu_w, y : y+self.mcu_h, component.order] = my_mcu
+                x = self.mcu_width * mcu_x
+                y = self.mcu_height * mcu_y
+                self.Img_array[x : x+self.mcu_width, y : y+self.mcu_height, component.order] = my_mcu
             
             # Go to the next MCU
             current_mcu += 1
@@ -617,13 +617,13 @@ class Mf_JpegDecoder():
     def show(self):
         #Display the decoded image in a window.
      
-    # Check if Pillow is installed, otherwise call show_checkpillow()
+    # Check if Pillow is installed, otherwise call show2()
         try:
            from PIL import Image
            from PIL.ImageTk import PhotoImage
         except ModuleNotFoundError:
             print("The Pillow module needs to be installed.")
-            self.show_checkpillow()
+            self.show2()
             return
 
         print("\nProceeding to the next step...")
@@ -636,7 +636,7 @@ class Mf_JpegDecoder():
     # Example: Call the save function directly (if needed)
     # self.save()
     
-    def show_checkpillow(self):
+    def show2(self):
         #Display the decoded image in the default image viewer of the operating system.
         
         try:
@@ -654,7 +654,7 @@ class Mf_JpegDecoder():
         """
         from PIL import Image
         from tkinter.filedialog import asksaveasfilename
-        #print( "Tommy")
+        print( "Tommy")
         # Open a file dialog for the user to provide a path
         
         img_path = self.file_path.with_suffix('.bmp')
@@ -881,7 +881,7 @@ if __name__ == "__main__":
             if dialog:
                 window = tk.Tk()
                 window.state("withdrawn")
-                print(" Please choose a JPEG image file...")
+                print("Please choose a JPEG image...")
                 jpeg_path = Path(
                     askopenfilename(
                         master = None,

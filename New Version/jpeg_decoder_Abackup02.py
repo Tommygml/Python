@@ -904,6 +904,466 @@ class JpegDecoder():
             """
         self.scan_count += 1
         print_progress(current_mcu, self.mcu_count, done=True)
+
+    def progressive_dct_scan(self,
+        huffman_tables_id:dict,
+        my_color_components:dict,
+        spectral_selection_start:int,
+        spectral_selection_end:int,
+        bit_position_high:int,
+        bit_position_low:int) -> None:
+
+        # Whether to the scan contains DC or AC values
+        if (spectral_selection_start == 0) and (spectral_selection_end == 0):
+            values = "dc"
+        elif (spectral_selection_start > 0) and (spectral_selection_end >= spectral_selection_start):
+            values = "ac"
+        else:
+            raise CorruptedJpeg("Progressive JPEG images cannot contain both DC and AC values in the same scan.")
+        """NOTE
+        In sequential JPEG both DC and AC values come in the same scan, however in progressive JPEG
+        they must come in different scans.
+        """
+        
+        # Whether this is a refining scan
+        if bit_position_high == 0:
+            refining = False
+        elif (bit_position_high - bit_position_low) == 1:
+            refining = True
+        else:
+            raise CorruptedJpeg("Progressive JPEG images cannot contain more than 1 bit for each value on a refining scan.")
+        """NOTE
+        The first scan of a value sends a certain amount of the value's most significant bits.
+        The following scans of the same value send the next bits, in order, one bit per scan.
+        Those scans are called "refining scans".
+        """
+        print(f"\nScan {self.scan_count+1} of {self.scan_amount}")
+        print(f"Color components: {', '.join(component.name for component in my_color_components.values())}")
+        print(f"Spectral selection: {spectral_selection_start}-{spectral_selection_end} ({values.upper()})")
+        print(f"Successive approximation: {bit_position_high}-{bit_position_low} ({'refining' if refining else 'first'} scan)")
+        print(f"MCU count: {self.mcu_count}")
+        print(f"Decoding MCUs...")
+
+        # Function to read the bits from the file's bytes
+        next_bits = self.bits_generator()
+
+        # Function to decode the next Huffman value
+        def next_huffval() -> int:
+            codeword = ""
+            huffman_value = None
+
+            while huffman_value is None:
+                codeword += next_bits()
+                if len(codeword) > 16:
+                    raise CorruptedJpeg(f"Failed to decode image ({current_mcu}/{self.mcu_count} MCUs decoded).")
+                huffman_value = huffman_table.get(codeword)
+            
+            return huffman_value
+
+        # Beginning of scan
+        current_mcu = 0
+        components_amount = len(my_color_components)
+        if (values == "ac") and (components_amount > 1):
+            raise CorruptedJpeg("An AC progressive scan can only have a single color component.")
+        """NOTE
+        A DC progressive scan can have more than one color component, while an AC progressive
+        scan must have only one color component.
+        """
+
+        # DC values scan
+        if values == "dc":
+            
+            # First scan (DC)
+            """NOTE
+            For the most part, the first DC scan on progressive mode is the same as on baseline mode.
+            The only difference is that the decoded value needs to have to undergo through a left
+            bit shift by the amount specified in 'bit_position_low', because the progressive scan
+            only gives this amount of the first bits of the value on the first scan.
+            """
+            if not refining:
+                # Previous DC values
+                previous_dc = np.zeros(components_amount, dtype="int16")
+
+            while (current_mcu < self.mcu_count):
+                
+                # Loop through all color components
+                for depth, (component_id, component) in enumerate(my_color_components.items()):
+
+                    # (x, y) coordinates, on the image, for the current MCU
+                    x = (current_mcu % self.mcu_count_h) * component.shape[0]
+                    y = (current_mcu // self.mcu_count_h) * component.shape[1]
+
+                    # Minimum coding unit (MCU) of the component
+                    if components_amount > 1:
+                        repeat = component.repeat
+                    else:
+                        repeat = 1
+                    
+                    # Blocks of 8 x 8 pixels for the color component
+                    for block_count in range(repeat):
+
+                        # Coordinates of the block on the current MCU
+                        block_y, block_x = divmod(block_count, component.horizontal_sampling)
+                        delta_y, delta_x = 8*block_y, 8*block_x
+                        
+                        # First scan of the DC values
+                        if not refining:
+                            # DC value of the block
+                            table_id = huffman_tables_id[component_id].dc
+                            huffman_table:dict = self.huffman_tables[table_id]
+                            huffman_value = next_huffval()
+                            
+                            # Get the DC value (partial)
+                            dc_value = bin_twos_complement(next_bits(huffman_value)) + previous_dc[depth]
+                            previous_dc[depth] = dc_value
+                            """NOTE
+                            The DC value is delta encoded in relation to the previous DC value of the
+                            same color component.
+                            Delta encoding is the difference between two consecutive values. So the
+                            decoded value is just added to the previous DC value in order to find
+                            the current value.
+                            For the first DC value, the previous value is considered to be zero.
+                            """
+                            
+                            # Store the partial DC value on the image array
+                            self.image_array[x+delta_x, y+delta_y, component.order] = (dc_value << bit_position_low)
+                            """NOTE
+                            'bit_position_low' is the position of the last value's bit sent in the scan.
+                            So the partial value has its bits left-shifted by this amount.
+                            """
+                        
+                        # Refining scan for the DC values
+                        else:
+                            new_bit = int(next_bits())
+                            self.image_array[x+delta_x, y+delta_y, component.order] |= (new_bit << bit_position_low)
+                            """NOTE
+                            A refining scan of the DC values just sent the next bit of each value, in the
+                            same order as the partial values were sent.
+                            So the bit is just OR'ed to the existing values, in the position the bit belongs.
+                            """
+                
+                # Go to the next MCU
+                current_mcu += 1
+                print_progress(current_mcu, self.mcu_count)
+                
+                # Check for restart interval
+                if (self.restart_interval > 0) and (current_mcu % self.restart_interval == 0) and (current_mcu != self.mcu_count):
+                    next_bits(amount=0, restart=True)
+                    if not refining:
+                        previous_dc[:] = 0
+                    """NOTE
+                    When the Restart Interval is reached, the previous DC values are reseted to zero
+                    and the file header is moved to the byte boundary after the marker.
+                    """
+
+        # AC values scan
+        elif values == "ac":
+            """NOTE
+            This scan always has one color component, and the MCU always is 8x8 pixels.
+            All the AC values are considered to be in one contiguous band.
+            
+            The band starts with the values specified on the spectral selection for the first MCU,
+            then those values for the next MCU, and so on until the whole image is covered.
+            
+            The order of the MCUs is: left-to-right starting from the top left, then top-to-bottom.
+            """
+            # Spectral selection
+            spectral_size = (spectral_selection_end + 1) - spectral_selection_start
+            
+            # Color component
+            (component_id, component), = my_color_components.items()
+
+            # Huffman table
+            table_id = huffman_tables_id[component_id].ac
+            huffman_table:dict = self.huffman_tables[table_id]
+
+            # End of band run length
+            eob_run = 0
+            """NOTE
+            It is the amount of bands that the decoder needs to skip during decoding.
+            (a band is the section of a MCU, as specified in the spectral selection)
+            On the first scan, all values in those bands are considered to be zero.
+            On refining scans, the non-zero values that were skiped will be refined.
+            """
+
+            # Zero run length
+            zero_run = 0
+            """NOTE
+            This is the amount of zero values to be skipped. If the run goes beyond
+            one band, then the run is finished.
+            
+            On refining scans, the non-zero values found along the way will be
+            refined (those values do not decrease the zero_run counter).
+            """
+
+            # Refining function
+            def refine_ac() -> None:
+                """Perform the refinement of the AC values on a progressive scan
+                """
+                nonlocal to_refine, next_bits, bit_position_low, component
+                
+                # Fetch the bits that will be used to refine the AC values
+                # (the bits come in the same order that the values to be refined were found)
+                refine_bits = next_bits(len(to_refine))
+
+                # Refine the AC values
+                ref_index = 0
+                while to_refine:
+                    ref_x, ref_y = to_refine.popleft()
+                    new_bit = int(refine_bits[ref_index], 2)
+                    self.image_array[ref_x, ref_y, component.order] |= new_bit << bit_position_low
+                    ref_index += 1
+
+            # Queue of AC values that will be refined
+            to_refine = deque()
+
+            # Decode and refine the AC values
+            current_mcu = 0
+            while (current_mcu < self.mcu_count):
+
+                # Coordinates of the MCU on the image
+                x = (current_mcu % self.mcu_count_h) * 8
+                y = (current_mcu // self.mcu_count_h) * 8
+
+                # Loop through the band
+                index = spectral_selection_start
+                while index <= spectral_selection_end:  # The element at the end of the band is included
+                    
+                    # Get the next Huffman value from the encoded data
+                    huffman_value = next_huffval()
+                    run_magnitute = huffman_value >> 4
+                    ac_bits_length = huffman_value & 0x0F
+                    
+                    # Determine the run length
+                    if huffman_value == 0:
+                        # End of band run of 1
+                        eob_run = 1
+                        break
+                    elif huffman_value == 0xF0:
+                        zero_run = 16
+                    elif (ac_bits_length == 0):
+                        # End of band run (length determined by the next bits on the data)
+                        # (amount of bands to skip)
+                        eob_bits = next_bits(run_magnitute)
+                        eob_run = (1 << run_magnitute) + int(eob_bits, 2)
+                        break
+                        """NOTE (EOB run)
+                        If the upper lower of the Huffman value is 0x0, and the upper nibble is from 0x0 to 0xE,
+                        then a End of Band Run (EOB run) is defined. The EOB run tells the decoder how many
+                        bands to skip.
+
+                        This amount is determined by the Huffman value and the bits following it. The upper nibble
+                        of the Huffman value determines the amplitude (N) of the EOB run (2^N). Then the next N bits
+                        on the data (following the Huffman value) determine the length to be added to the EOB run.
+                        Those bits are converted from binary to decimal and added to 2^N:
+                        EOB run = 2^N + length
+                        """
+                    else:
+                        # Amount of zero values to skip
+                        zero_run = run_magnitute
+                        """NOTE (Zero run)
+                        If the lower nibble of the Huffman value greater than 0x0 (except for 0xF0), then a zero run
+                        is defined. The zero run is the amount of zero values to skip within a band. This amount is
+                        determined directly by the value of the upper nibble of the Huffman value.
+                        
+                        The lower nibble determines the bit-length (N) of the next non-zero AC value.
+                        The next N bits on the data (following the Huffman value) are the next AC value,
+                        in a binary two's complement representation.
+
+                        A Huffman value of 0xF0 defines a zero run of length 16, with no AC value bits following it.
+                        """
+                    
+                    # Perform the zero run
+                    if not refining and zero_run:   # First scan
+                        index += zero_run
+                        zero_run = 0
+                        """NOTE
+                        On the first scan, all AC values skipped are considered to be zero.
+                        """
+                    else:
+                        while zero_run > 0:         # Refining scan
+                            xr, yr = zagzig[index]
+                            current_value = self.image_array[x + xr, y + yr, component.order]
+                            
+                            if current_value == 0:
+                                zero_run -= 1
+                            else:
+                                to_refine.append((x + xr, y + yr))
+                            
+                            index += 1
+                            """NOTE
+                            On a refining scan, only the zero AC values decrease the zero run counter.
+                            The decoder keeps moving to the next AC value until the counter is depleted.
+                            The non-zero values found along the way are enqueued to be refined.
+                            """
+                    
+                    # Decode the next AC value
+                    if ac_bits_length > 0:
+                        ac_bits = next_bits(ac_bits_length)
+                        ac_value = bin_twos_complement(ac_bits)
+                        
+                        # Store the AC value on the image array
+                        # (the zig-zag scan order is undone to find the position of the value on the image)
+                        ac_x, ac_y = zagzig[index]
+
+                        # In order to create a new AC value, the decoder needs to be at a zero value
+                        # (the index is moved until a zero is found, other values along the way will be refined)
+                        if refining:
+                            while self.image_array[x + ac_x, y + ac_y, component.order] != 0:
+                                to_refine.append((x + ac_x, y + ac_y))
+                                index += 1
+                                ac_x, ac_y = zagzig[index]
+                                """NOTE
+                                On a refining scan, when the lower nibble of the Huffman value is not zero
+                                then a new AC value is created. However the new AC value cannot be created
+                                in the spot where there is an existing AC value. So if the decoder happens
+                                to be at a non-zero AC value, then it moves to the next spot until a zero
+                                is found. The non-zero values found along the way are enqueued to be refined.
+                                """
+                        
+                        # Create a new ac_value
+                        self.image_array[x + ac_x, y + ac_y, component.order] = ac_value << bit_position_low
+                        
+                        # Move to the next value
+                        index += 1
+                    
+                    # Refine AC values skipped by the zero run
+                    if refining:
+                        refine_ac()
+                        """NOTE
+                        Following the bits of the AC value (on the image data), come the bits of all
+                        values enqueued to be refined. One bit per value, in the same order the values
+                        were found. So if N values are going to be refined, then N bits will follow.
+                        """
+                
+                # Move to the next band if we are at the end of a band
+                if index > spectral_selection_end:
+                    current_mcu += 1
+                    if refining:
+                        # Coordinates of the MCU on the image
+                        x = (current_mcu % self.mcu_count_h) * 8
+                        y = (current_mcu // self.mcu_count_h) * 8
+
+                # Perform the end of band run
+                if not refining:            # First scan
+                    current_mcu += eob_run
+                    eob_run = 0
+                    """NOTE
+                    In the first scan, all the skipped AC values are consideded to be zero.
+                    If the EOB run is called when a band has been partially processed, then
+                    only the remaining values on the band are considered zero (this band
+                    stills count for the EOB run counter).
+                    """
+                
+                else:                       # Refining scan
+                    while eob_run > 0:
+                        xr, yr = zagzig[index]
+                        current_value = self.image_array[x + xr, y + yr, component.order]
+                        
+                        if current_value != 0:
+                            to_refine.append((x + xr, y + yr))
+                        
+                        index += 1
+                        if index > spectral_selection_end:
+                            
+                            # Move to the next band
+                            eob_run -= 1
+                            current_mcu += 1
+                            index = spectral_selection_start
+                            
+                            # Coordinates of the MCU on the image
+                            x = (current_mcu % self.mcu_count_h) * 8
+                            y = (current_mcu // self.mcu_count_h) * 8
+                    """NOTE
+                    On a refining scan, the non-zero values that were skipped are enqueued
+                    to be refined. If the EOB run begins on a partially processed band, then
+                    only the remaining values on the band are considered (this band still
+                    decreases the EOB run counter).
+                    """
+                
+                # Refine the AC values found during the EOB run
+                if refining:
+                    refine_ac()
+                    """NOTE
+                    On the image data stream, the bits following the Huffman value that defined
+                    an EOB run will be used to refine the non-zero AC values that were skipped
+                    during the run. If N non-zero values were skipped, then N bits will follow
+                    to refine them. One bit per value, in the same order the values were found.
+                    """
+                
+                print_progress(current_mcu, self.mcu_count)
+
+                 # Check for restart interval
+                if (self.restart_interval > 0) and (current_mcu % self.restart_interval == 0) and (current_mcu != self.mcu_count):
+                    next_bits(amount=0, restart=True)
+                    """NOTE
+                    When a restart interval is reashed, then the decoder moves to the next byte
+                    boundary (if not already at one), and then jumps over the restart marker (2 bytes long).
+                    """
+        
+        print_progress(current_mcu, self.mcu_count, done=True)
+        
+        # Check if all scans have been performed and perform the IDCT
+        self.scan_count += 1
+        if self.scan_count == self.scan_amount:
+
+            # Function to perform the inverse discrete cosine transform (IDCT)
+            idct = InverseDCT()
+
+            # Function to resize a block of color values
+            resize = ResizeGrid()
+            
+            # Perform the IDCT once all scans have finished
+            dct_array = self.image_array.copy()
+            print("\nPerforming IDCT on each color component...")
+            for component in self.color_components.values():
+
+                # Quantization table used by the component
+                quantization_table = self.quantization_tables[component.quantization_table_id]
+
+                # Subsampling ratio
+                ratio_h = self.sample_shape[0] // component.shape[0]
+                ratio_v = self.sample_shape[1] // component.shape[1]
+
+                # Dimensions of the MCU of the component
+                component_width = self.array_width // ratio_h
+                component_height = self.array_height // ratio_v
+
+                # Amount of MCUs
+                mcu_count_h = component_width // 8
+                mcu_count_v = component_height // 8
+                mcu_count = mcu_count_h * mcu_count_v
+
+                # Perform the inverse discrete cosine transform (IDCT)
+                for current_mcu in range(mcu_count):
+                    
+                    # Get coordinates of the block
+                    x1 = (current_mcu % mcu_count_h) * 8
+                    y1 = (current_mcu // mcu_count_h) * 8
+                    x2 = x1 + 8
+                    y2 = y1 + 8
+
+                    # Undo quantization on the block
+                    block = dct_array[x1 : x2, y1 : y2, component.order]
+                    block *= quantization_table
+
+                    # Perform IDCT on the block to get the color values
+                    block = idct(block.reshape(8, 8))
+
+                    # Upsample the block if necessary
+                    if component.shape != self.sample_shape:
+                        block = resize(block, self.sample_shape)
+                        x1 *= ratio_h
+                        y1 *= ratio_v
+                        x2 *= ratio_h
+                        y2 *= ratio_v
+                    
+                    # Store the color values of the image array
+                    self.image_array[x1 : x2, y1 : y2, component.order] = block
+
+                    print_progress(current_mcu+1, mcu_count, header=component.name.ljust(2))
+                
+                print_progress(current_mcu+1, mcu_count, header=component.name.ljust(2), done=True)
   
     def end_of_image(self, data:bytes) -> None:
         """Method called when the 'end of image' marker is reached.
@@ -931,7 +1391,7 @@ class JpegDecoder():
     
     def show(self):
         #Display the decoded image in a window.
-   
+     
     # Check if Pillow is installed, otherwise call show2()
         try:
            from PIL import Image
@@ -942,16 +1402,92 @@ class JpegDecoder():
             return
 
         print("\nProceeding to the next step...")
-
+        self.save()
+    
     # Here, add any essential operations that need to be performed before proceeding
     # For example, if you need to save the image or perform some processing,
     # include that code here.
 
     # Example: Call the save function directly (if needed)
     # self.save()
-    
-    
-    
+    """
+        try:
+            import tkinter as tk
+            from tkinter import ttk
+        except ModuleNotFoundError:
+            self.show2()
+            return
+        try:
+            from PIL import Image
+            from PIL.ImageTk import PhotoImage
+        except ModuleNotFoundError:
+            print("The Pillow module needs to be installed in order to display the rendered image.")
+            print("For installing: https://pillow.readthedocs.io/en/stable/installation.html")
+
+        print("\nRendering the decoded image...")
+
+        # Create the window
+        window = tk.Tk()
+        window.title(f"Decoded JPEG: {self.file_path.name}")
+        try:
+            window.state("zoomed")
+        except tk.TclError:
+            window.state("normal")
+
+        # Horizontal and vertical scrollbars
+        scrollbar_h = ttk.Scrollbar(orient = tk.HORIZONTAL)
+        scrollbar_v = ttk.Scrollbar(orient = tk.VERTICAL)
+        
+        # Canvas where the image will be drawn
+        canvas = tk.Canvas(
+            width = self.image_width,
+            height = self.image_height,
+            scrollregion = (0, 0, self.image_width, self.image_height),
+            xscrollcommand = scrollbar_h.set,
+            yscrollcommand = scrollbar_v.set,
+        )
+        scrollbar_h["command"] = canvas.xview
+        scrollbar_v["command"] = canvas.yview
+
+        # Button for saving the image
+        save_button = ttk.Button(
+            command = self.save,
+            text = "Save decoded image",
+            padding = 1,
+        )
+        
+        # Convert the image array to a format that Tkinter understands
+        my_image = PhotoImage(
+            Image.fromarray(
+                np.swapaxes(self.image_array, 0, 1)
+            )
+        )
+
+        # Draw the image to the canvas
+        canvas.create_image(0, 0, image=my_image, anchor="nw")
+
+        # Add the canvas and scrollbars to the window
+        canvas.pack()
+        scrollbar_h.pack(
+            side = tk.BOTTOM,
+            fill = tk.X,
+            before = canvas,
+        )
+        scrollbar_v.pack(
+            side = tk.RIGHT,
+            fill = tk.Y,
+            before = canvas,
+        )
+
+        # Add the save button to the window
+        save_button.pack(
+            side = tk.TOP,
+            before = canvas,
+        )
+
+        # Open the window
+        window.mainloop()
+    """
     def show2(self):
         #Display the decoded image in the default image viewer of the operating system.
         
@@ -1002,7 +1538,7 @@ class JpegDecoder():
         # Convert the image array to a PIL object
         my_image = Image.fromarray(np.swapaxes(self.image_array, 0, 1))
 
-        # Save the image to disk
+        #  the image to disk
         try:
             my_image.save(img_path)
         except ValueError:
@@ -1187,14 +1723,12 @@ def YCbCr_to_RGB(image_array:np.ndarray) -> np.ndarray:
 def print_progress(current:int, total:int, done:bool=False, header:str="Progress") -> None:
     """Print a progress percentage on the screen. If the process is not done yet,
     the line is updated instead of moving to the next line.
-    
+    """
     if not done:
         print(f"{header}: {current}/{total} ({current * 100 / total:.2f}%)", end="\r")
     else:
         print(f"{header}: {current}/{total} ({current * 100 / total:.0f}%) DONE!")
-    """    
-    if done:
-        print("Completed!")
+
 # ----------------------------------------------------------------------------
 # Decoder exceptions
 
