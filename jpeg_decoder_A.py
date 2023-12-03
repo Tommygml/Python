@@ -904,7 +904,7 @@ class JpegDecoder():
             """
         self.scan_count += 1
         print_progress(current_mcu, self.mcu_count, done=True)
-
+  """
     def progressive_dct_scan(self,
         huffman_tables_id:dict,
         my_color_components:dict,
@@ -1364,7 +1364,7 @@ class JpegDecoder():
                     print_progress(current_mcu+1, mcu_count, header=component.name.ljust(2))
                 
                 print_progress(current_mcu+1, mcu_count, header=component.name.ljust(2), done=True)
-
+  """
     def end_of_image(self, data:bytes) -> None:
         """Method called when the 'end of image' marker is reached.
         The file parsing is finished, the image is converted to RGB and displayed."""
@@ -1388,10 +1388,10 @@ class JpegDecoder():
         self.scan_finished = True
         self.show()
         del self.raw_file
-
+    
     def show(self):
-        """Display the decoded image in a window.
-        """
+        #Display the decoded image in a window.
+        
         try:
             import tkinter as tk
             from tkinter import ttk
@@ -1470,8 +1470,8 @@ class JpegDecoder():
         window.mainloop()
 
     def show2(self):
-        """Display the decoded image in the default image viewer of the operating system.
-        """
+        #Display the decoded image in the default image viewer of the operating system.
+        
         try:
             from PIL import Image
         except ModuleNotFoundError:
@@ -1487,10 +1487,9 @@ class JpegDecoder():
         """
         from PIL import Image
         from tkinter.filedialog import asksaveasfilename
-        
+        print( "Tommy")
         # Open a file dialog for the user to provide a path
-        img_path = self.file_path.with_suffix('.bmp')
-        """ 
+        """"
         img_path = Path(
             asksaveasfilename(
                 defaultextension = "png",
@@ -1504,11 +1503,12 @@ class JpegDecoder():
                 initialdir = self.file_path.parent,
             )
         )
-        
+        """"
+        img_path = self.file_path.with_suffix('.bmp')
         # If the user has canceled, then exit the function
-         if img_path == Path():
+        if img_path == Path():
             return
-        """
+        
         # Make sure that the saved image does not overwrite an existing file
         count = 1
         my_stem = img_path.stem

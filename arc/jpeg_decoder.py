@@ -1489,8 +1489,6 @@ class JpegDecoder():
         from tkinter.filedialog import asksaveasfilename
         
         # Open a file dialog for the user to provide a path
-        img_path = self.file_path.with_suffix('.bmp')
-        """ 
         img_path = Path(
             asksaveasfilename(
                 defaultextension = "png",
@@ -1504,11 +1502,11 @@ class JpegDecoder():
                 initialdir = self.file_path.parent,
             )
         )
-        
+
         # If the user has canceled, then exit the function
-         if img_path == Path():
+        if img_path == Path():
             return
-        """
+        
         # Make sure that the saved image does not overwrite an existing file
         count = 1
         my_stem = img_path.stem
